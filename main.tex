@@ -1,0 +1,191 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amsfonts,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumerate}
+\usepackage{graphicx}
+\usepackage{framed}
+
+\geometry{margin=1in}
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\title{A BLAKE3-Verified Metered Data Exchange Protocol}
+\author{Jay Logelin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a protocol for exchanging data in a metered fashion between two parties, a Provider ($\mathsf{P}$) and a Consumer ($\mathsf{C}$). 
+The protocol ensures fair payment for each data chunk, leveraging ephemeral encryption keys and chunk-level BLAKE3 hashing. 
+Additionally, an overall BLAKE3 hash enforces end-to-end data integrity verification. 
+Our protocol limits the impact of misbehavior by either party to a single chunk at a time and enables streaming verification of large data sets.
+\end{abstract}
+
+\section{Introduction}
+In many scenarios, one party (the \emph{Provider}, $\mathsf{P}$) possesses data to be sold, while another party (the \emph{Consumer}, $\mathsf{C}$) wishes to purchase it. 
+A straightforward approach where $\mathsf{C}$ pays upfront for the entire data and then trusts $\mathsf{P}$ to deliver the correct content is fraught with risks:
+\begin{itemize}
+    \item $\mathsf{P}$ might not deliver the data after receiving payment.
+    \item $\mathsf{P}$ might deliver corrupted or incomplete data.
+    \item $\mathsf{C}$, on the other hand, might refuse to pay for data after obtaining it.
+\end{itemize}
+To mitigate these issues, we propose a \textbf{metered exchange protocol} in which data is chunked, encrypted, and sold in small increments. 
+Each increment is validated for integrity, and payment is made before the decryption key is released. 
+Moreover, chunk-level verification is supplemented by an overall BLAKE3 integrity check after reconstructing all chunks.
+
+\section{System Model \& Notation}
+\subsection{Parties}
+\begin{itemize}
+    \item $\mathsf{P}$: The \textbf{Provider}, who owns the full data $D$ of length $|D|$ bytes.
+    \item $\mathsf{C}$: The \textbf{Consumer}, who wishes to acquire $D$ in exchange for tokens.
+\end{itemize}
+
+\subsection{Notation}
+\begin{itemize}
+    \item $D$: The full data (byte string) of length $n = |D|$.
+    \item $m$: A chosen \emph{chunk size} in bytes.
+    \item $N = \lceil n / m \rceil$: The total number of chunks.
+    \item $D_i$: The $i$-th chunk of $D$, where $D_i \in \{0,1\}^m$ (except possibly the last chunk if $n$ is not a multiple of $m$).
+    \item $K_i$: An \emph{ephemeral key} (symmetric) for encrypting $D_i$. Typically, $K_i \in \{0,1\}^{k}$ (e.g., $k=128$ or $256$ bits).
+    \item $\mathsf{Enc}(K_i, D_i)$: A secure encryption function returning $(C_i, \mathit{nonce}_i, \mathit{tag}_i)$, e.g., AES-GCM.
+    \item $\mathsf{Dec}(K_i, C_i, \mathit{nonce}_i, \mathit{tag}_i)$: The corresponding decryption function.
+    \item $\mathsf{H}_{\mathrm{B3}}(\cdot)$: The BLAKE3 hash function (returning a fixed-size digest).
+    \item $h_i = \mathsf{H}_{\mathrm{B3}}(D_i)$: The BLAKE3 hash of the \emph{plaintext} chunk $D_i$.
+    \item $H_{\mathrm{full}} = \mathsf{H}_{\mathrm{B3}}(D)$: The BLAKE3 hash of the entire data $D$, often computed in a streaming manner.
+    \item $p_i$: The \emph{price} in tokens that $\mathsf{C}$ must pay to obtain the key $K_i$ for chunk $i$.
+\end{itemize}
+
+\subsection{Assumptions}
+\begin{assumption}
+Both $\mathsf{P}$ and $\mathsf{C}$ have a secure communication channel to exchange data chunks and ephemeral keys. 
+This can be done over a network with TLS, or via a secure messaging protocol.
+\end{assumption}
+
+\begin{assumption}
+Payments are \emph{atomic} from $\mathsf{C}$ to $\mathsf{P}$, meaning $\mathsf{C}$ either pays exactly $p_i$ tokens or does not pay at all. 
+We assume an out-of-band ledger, payment channel, or on-chain mechanism can guarantee that once a payment is sent, $\mathsf{P}$ observes it irrevocably.
+\end{assumption}
+
+\begin{assumption}
+BLAKE3 is collision-resistant and cryptographically secure for the chunk-level and overall hash verifications. 
+AES-GCM (or any secure AEAD scheme) is used for encryption, ensuring confidentiality and integrity of each chunk.
+\end{assumption}
+
+\section{Protocol Specification}
+
+\subsection{Preparation by $\mathsf{P}$}
+\begin{enumerate}[{\bf P1.}]
+    \item \textbf{Chunking:} Split $D$ into $N$ chunks $\{D_1, D_2, \ldots, D_N\}$, each of size $m$ bytes (the last chunk may be shorter).
+    \item \textbf{Hashing:} For each chunk $D_i$, compute $h_i = \mathsf{H}_{\mathrm{B3}}(D_i)$. 
+    \item \textbf{Ephemeral Keys:} Generate $N$ random keys $\{K_1, K_2, \ldots, K_N\}$ using a secure random generator.
+    \item \textbf{Chunk Encryption:} For each chunk $D_i$, compute $(C_i, \mathit{nonce}_i, \mathit{tag}_i) = \mathsf{Enc}(K_i, D_i)$.
+    \item \textbf{Overall Hash:} Compute $H_{\mathrm{full}} = \mathsf{H}_{\mathrm{B3}}(D)$ (or do it in streaming fashion).
+    \item \textbf{Set Prices:} Assign a cost $p_i$ for each chunk $i$ (for simplicity, set $p_i = p$ constant or vary as desired).
+\end{enumerate}
+
+At the end of the preparation, $\mathsf{P}$ holds:
+\[
+   \left\{ (C_i, \mathit{nonce}_i, \mathit{tag}_i), K_i, h_i, p_i \right\}_{i=1}^N 
+   \quad \text{and} \quad H_{\mathrm{full}}.
+\]
+
+\subsection{Chunk Acquisition by $\mathsf{C}$}
+\begin{enumerate}[{\bf C1.}]
+    \item \textbf{Request Encrypted Chunk:} For some chunk index $i$, $\mathsf{C}$ requests $(C_i, \mathit{nonce}_i, \mathit{tag}_i)$ from $\mathsf{P}$.
+    \item \textbf{Verification of Metadata:} (Optional) $\mathsf{C}$ can check if $(C_i, \mathit{nonce}_i, \mathit{tag}_i)$ hash matches $\mathsf{P}$'s commitment to detect trivial tampering. 
+    (In practice, $\mathsf{C}$ may rely on $h_i$ \emph{after} decryption.)
+    \item \textbf{Payment for Key:} $\mathsf{C}$ transfers $p_i$ tokens to $\mathsf{P}$ for chunk $i$. 
+    If $\mathsf{C}$ lacks sufficient tokens, the protocol aborts.
+\end{enumerate}
+
+\subsection{Key Disclosure by $\mathsf{P}$}
+\begin{enumerate}[{\bf P2.}]
+    \item Upon observing the payment for chunk $i$, $\mathsf{P}$ reveals the ephemeral key $K_i$ to $\mathsf{C}$.
+\end{enumerate}
+
+\subsection{Decryption \& Verification by $\mathsf{C}$}
+\begin{enumerate}[{\bf C2.}]
+    \item \textbf{Decrypt Chunk:} $\mathsf{C}$ computes $\widehat{D_i} = \mathsf{Dec}(K_i, C_i, \mathit{nonce}_i, \mathit{tag}_i)$. 
+    \item \textbf{Chunk-Level Hash Check:} $\mathsf{C}$ verifies that $\mathsf{H}_{\mathrm{B3}}(\widehat{D_i}) = h_i$. 
+    If it does not match, $\mathsf{C}$ aborts and refuses to download (and pay for) further chunks.
+    \item \textbf{Streaming Hash Update:} $\mathsf{C}$ appends $\widehat{D_i}$ to a local reassembly buffer or streaming hasher for final verification. 
+    Specifically, $\mathsf{C}$ maintains a BLAKE3 streaming state $S$. 
+    After decrypting chunk $i$, $\mathsf{C}$ runs:
+    \[
+       S \leftarrow S \Vert \widehat{D_i}.
+    \]
+\end{enumerate}
+
+\subsection{Final Assembly and Overall Hash Verification}
+\begin{enumerate}[{\bf C3.}]
+    \item After acquiring all $N$ chunks in sequence or in any chosen order, $\mathsf{C}$ finalizes the local BLAKE3 streaming hasher over the concatenation $\widehat{D_1} \Vert \widehat{D_2} \Vert \dots \Vert \widehat{D_N}$. 
+    \[
+       \widehat{H_{\mathrm{full}}} = \mathsf{H}_{\mathrm{B3}}\bigl(\widehat{D_1} \Vert \cdots \Vert \widehat{D_N}\bigr).
+    \]
+    \item $\mathsf{C}$ compares $\widehat{H_{\mathrm{full}}}$ to $H_{\mathrm{full}}$, which $\mathsf{P}$ advertised initially. 
+    If $\widehat{H_{\mathrm{full}}} \neq H_{\mathrm{full}}$, $\mathsf{C}$ concludes the data was not consistent with $\mathsf{P}$'s original commitment.
+\end{enumerate}
+
+\section{Security Analysis}
+\subsection{Correctness}
+The protocol is correct if:
+\begin{enumerate}
+    \item For each chunk $i$, $\mathsf{C}$ pays $p_i$ to $\mathsf{P}$ and obtains $K_i$.
+    \item The decryption of $C_i$ using $K_i$ yields $D_i$ without error.
+    \item The final assembled data $\widehat{D_1}\Vert \cdots \Vert \widehat{D_N}$ matches the original data $D$ if no adversarial corruption occurs.
+\end{enumerate}
+
+\subsection{Fairness \& Chunk-by-Chunk Payment}
+Because the protocol exchanges each key $K_i$ for payment $p_i$, $\mathsf{C}$ only risks losing the funds for that \emph{one chunk} in the event $\mathsf{P}$ withholds the correct key. 
+If $\mathsf{C}$ detects cheating (e.g., a bad chunk hash), it can stop downloading further chunks and not lose more tokens. 
+Likewise, $\mathsf{P}$ only risks revealing a single chunk’s key if $\mathsf{C}$ fails to pay for the next chunk.
+
+\subsection{Integrity via BLAKE3 Hashing}
+BLAKE3 hashing is used at two levels:
+\begin{itemize}
+    \item \textbf{Chunk-level hash} $h_i$ ensures each decrypted chunk $\widehat{D_i}$ matches $D_i$ and detects any in-transit corruption or tampering.
+    \item \textbf{Overall hash} $H_{\mathrm{full}}$ ensures the final reassembly $\widehat{D}$ is the same as $\mathsf{P}$’s original data.
+\end{itemize}
+Any mismatch in $h_i$ or $H_{\mathrm{full}}$ indicates malicious behavior or corruption.
+
+\subsection{Limitations}
+\begin{enumerate}
+    \item The protocol does not, by itself, enforce that $\mathsf{P}$ must provide all keys (a malicious $\mathsf{P}$ can stop at any time). 
+    However, chunk-by-chunk exchange minimizes the financial impact on $\mathsf{C}$.
+    \item A purely off-chain approach might require trust or external arbitration. 
+    For fully trustless operation, integrate with a blockchain-based payment system or a channel that atomically exchanges tokens for ephemeral keys (e.g., hashed time-locked contracts).
+\end{enumerate}
+
+\section{Conclusion}
+We have presented a metered data exchange protocol featuring ephemeral encryption keys, chunk-level BLAKE3 integrity verification, and an overall BLAKE3 streaming integrity check. 
+By processing data chunk by chunk, the protocol makes cheating less profitable and reduces reliance on trust assumptions. 
+Integrating with secure payment channels or on-chain logic can further enhance fairness, making this protocol suitable for large-scale data exchanges in potentially adversarial environments.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{blake3}
+J. Oeschlin, J. Teutsch, and J. Blandy.
+\newblock \emph{BLAKE3: One function, fast everywhere}.
+\newblock 2020. \url{https://github.com/BLAKE3-team/BLAKE3}
+
+\bibitem{aesgcm}
+Rogaway, P.
+\newblock \emph{Evaluation of some blockcipher modes of operation}.
+\newblock 2011.
+
+\end{thebibliography}
+
+\end{document}
